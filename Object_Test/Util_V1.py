@@ -30,6 +30,35 @@ print("<---------------------------")
 _epsilon = K.epsilon()
 _epsilon = K.cast(_epsilon, 'float32')
 
+def generating_consequences(results):
+    Pc = results[:, :, :, 0]
+    Pc = K.reshape(x = Pc, shape=(-1, 19, 14, 1))
+    Pc = K.sigmoid(Pc)
+    x ,y ,w ,h = return_coordinates(y_pred=results)
+    x = K.reshape(x=x, shape=(-1, 19, 14, 1))
+    y = K.reshape(x=y, shape=(-1, 19, 14, 1))
+    w = K.reshape(x=w, shape=(-1, 19, 14, 1))
+    h = K.reshape(x=h, shape=(-1, 19, 14, 1))
+    Boxes = K.concatenate([x, y, w, h], axis=-1)
+    Class = results[:, :, :, 5:]
+    Class = K.softmax(Class)
+    Box_scores = Pc * Class
+    Box_classes = K.argmax(Box_scores, axis=-1)
+    Box_class_scores = K.max(Box_scores, axis=-1)
+    Box_classes = K.reshape(x=Box_classes, shape=(_batch_size, -1))
+    Box_class_scores = K.reshape(x=Box_class_scores, shape=(_batch_size, -1))
+    Boxes = K.reshape(x=Boxes, shape=(_batch_size, -1, 4))
+    TOPK = tf.nn.top_k(input=Box_class_scores, k=5)
+    indices = TOPK.indices
+    temp = np.zeros(indices.shape)
+    temp[:] = np.arange(0, _batch_size, 1).reshape(_batch_size, -1)
+    indices = tf.stack([temp, indices], axis= 2)
+    indices = tf.cast(indices, 'int64')
+    scores = tf.gather_nd(params=Box_class_scores, indices=indices)
+    boxes = tf.gather_nd(params=Boxes, indices=indices)
+    classes = tf.gather_nd(params=Box_classes, indices=indices)
+    return boxes, classes, scores
+
 class DecayByEpoch(keras.callbacks.Callback):
     def on_epoch_end(self, epoch, log=[]):
         global Hdecay
@@ -136,8 +165,6 @@ def Loss_v1(y_true, y_pred):
 def Loss_v2(y_true, y_pred):
     Pc_pred = y_pred[:, :, :, 0]
     Pc_pred = K.sigmoid(x=Pc_pred)
-    global _epsilon
-    Pc_pred = tf.clip_by_value(t=Pc_pred, clip_value_min = _epsilon, clip_value_max = 1 - _epsilon)
     Pc_pred = K.cast(Pc_pred, 'float32')
     xpred, ypred, wpred, hpred = return_coordinates(y_pred)
     x1_pred, y1_pred, x2_pred, y2_pred = transform_to_coordinate(xpred, ypred, wpred, hpred)
@@ -164,6 +191,7 @@ def Loss_v2(y_true, y_pred):
                                   y_max_true, y_min_true)
     mat = K.cast(matching, 'float32')
 
+    global _epsilon
 
     C_Class_Array = softmax(x = C_Class_Array, axis= -1)
     C_Class_Array = tf.clip_by_value(t=C_Class_Array, clip_value_min = _epsilon, clip_value_max = 1 - _epsilon)
@@ -175,8 +203,8 @@ def Loss_v2(y_true, y_pred):
 
     Localization_loss = weight_Localization_loss * mat * (K.square(x1_pred - x_min_true) + K.square(x2_pred - x_max_true) + K.square(
         y1_pred - y_min_true) + K.square(y2_pred - y_max_true))
-    Object_loss = -(1 - Pc_pred) * K.log(Pc_pred) * mat - (1 - mat) * K.log(1-Pc_pred) * Pc_pred
-    Object_loss = Object_loss * weight_Object_loss
+
+    Object_loss = weight_Object_loss * (mat * K.square(1 - Pc_pred) + (1 - mat) * K.square(Pc_pred))
 
     Total_loss = K.mean(axis=-1, x= K.mean(axis=-1, x=Classification_loss)) + K.mean(axis=-1, x=Localization_loss) + K.mean(axis=-1, x=Object_loss)
     Totalloss = K.mean(x=Total_loss, axis=-1)

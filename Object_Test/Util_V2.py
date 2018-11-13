@@ -1,5 +1,4 @@
 import keras.backend as K
-from keras.activations import softmax
 from keras.losses import categorical_crossentropy
 import keras
 import numpy as np
@@ -25,29 +24,39 @@ print(_batch_size)
 _epsilon = K.epsilon()
 _epsilon = K.cast(_epsilon, 'float32')
 
+def generating_consequences(results):
+    Pc = results[:, :, :, 0]
+    Pc = K.reshape(x = Pc, shape=(-1, 19, 14, 1))
+    x ,y ,w ,h = return_coordinates(y_pred=results)
+    x = K.reshape(x=x, shape=(-1, 19, 14, 1))
+    y = K.reshape(x=y, shape=(-1, 19, 14, 1))
+    w = K.reshape(x=w, shape=(-1, 19, 14, 1))
+    h = K.reshape(x=h, shape=(-1, 19, 14, 1))
+    Boxes = K.concatenate([x, y, w, h], axis=-1)
+    Class = results[:, :, :, 5:]
+    Box_scores = Pc * Class
+    Box_classes = K.argmax(Box_scores, axis=-1)
+    Box_class_scores = K.max(Box_scores, axis=-1)
+    Box_classes = K.reshape(x=Box_classes, shape=(_batch_size, -1))
+    Box_class_scores = K.reshape(x=Box_class_scores, shape=(_batch_size, -1))
+    Boxes = K.reshape(x=Boxes, shape=(_batch_size, -1, 4))
+    TOPK = tf.nn.top_k(input=Box_class_scores, k=5)
+    indices = TOPK.indices
+    temp = np.zeros(indices.shape)
+    temp[:] = np.arange(0, _batch_size, 1).reshape(_batch_size, -1)
+    indices = tf.stack([temp, indices], axis= 2)
+    indices = tf.cast(indices, 'int64')
+    scores = tf.gather_nd(params=Box_class_scores, indices=indices)
+    boxes = tf.gather_nd(params=Boxes, indices=indices)
+    classes = tf.gather_nd(params=Box_classes, indices=indices)
+    return boxes, classes, scores
+
 def transform_to_coordinate(x, y, w, h):
     x1 = x - K.cast(w / 2, 'float32')
     y1 = y - K.cast(h / 2, 'float32')
     x2 = x + K.cast(w / 2, 'float32')
     y2 = y + K.cast(h / 2, 'float32')
     return [x1, y1, x2, y2]
-
-
-def Matching(x1_pred, y1_pred, x2_pred, y2_pred, x_max_true, x_min_true, y_max_true, y_min_true):
-    intersect_x1 = K.maximum(x1_pred, x_min_true)
-    intersect_y1 = K.maximum(y1_pred, y_min_true)
-    intersect_x2 = K.minimum(x2_pred, x_max_true)
-    intersect_y2 = K.minimum(y2_pred, y_max_true)
-
-    area_1 = (x2_pred - x1_pred) * (y2_pred - y1_pred)
-    area_2 = (x_max_true - x_min_true) * (y_max_true - y_min_true)
-
-    intersect_area = (intersect_x2 - intersect_x1) * (intersect_y2 - intersect_y1)
-
-    IOU = intersect_area / (area_1 + area_2 - intersect_area)
-    matching = K.greater_equal(IOU, 0.6)
-    return matching
-
 
 def Checking_if_object(x1_window, y1_window, x2_window, y2_window, x_max_true, x_min_true, y_max_true, y_min_true):
     x_middle_true = (x_max_true + x_min_true)/2.0
@@ -121,8 +130,6 @@ def Loss_v1(y_true, y_pred):
 def Loss_v2(y_true, y_pred):
     Pc_pred = y_pred[:, :, :, 0]
     Pc_pred = K.cast(Pc_pred, 'float32')
-    global _epsilon
-    Pc_pred = tf.clip_by_value(t=Pc_pred, clip_value_min = _epsilon, clip_value_max = 1 - _epsilon)
     xpred, ypred, wpred, hpred = return_coordinates(y_pred)
     x1_pred, y1_pred, x2_pred, y2_pred = transform_to_coordinate(xpred, ypred, wpred, hpred)
 
@@ -148,6 +155,8 @@ def Loss_v2(y_true, y_pred):
                                   y_max_true, y_min_true)
     mat = K.cast(matching, 'float32')
 
+    global _epsilon
+
     C_Class_Array = tf.clip_by_value(t=C_Class_Array, clip_value_min = _epsilon, clip_value_max = 1 - _epsilon)
     Classification_loss = categorical_crossentropy(y_true= C_index_true, y_pred= C_Class_Array)
 
@@ -158,8 +167,7 @@ def Loss_v2(y_true, y_pred):
     Localization_loss = weight_Localization_loss * mat * (K.square(x1_pred - x_min_true) + K.square(x2_pred - x_max_true) + K.square(
         y1_pred - y_min_true) + K.square(y2_pred - y_max_true))
 
-    Object_loss = -(1 - Pc_pred) * K.log(Pc_pred) * mat - (1 - mat) * K.log(1-Pc_pred) * Pc_pred
-    Object_loss = Object_loss * weight_Object_loss
+    Object_loss = weight_Object_loss * (mat * K.square(1 - Pc_pred) + (1 - mat) * K.square(Pc_pred))
 
     Total_loss = K.mean(axis=-1, x= K.mean(axis=-1, x=Classification_loss)) + K.mean(axis=-1, x=Localization_loss) + K.mean(axis=-1, x=Object_loss)
     Totalloss = K.mean(x=Total_loss, axis=-1)
